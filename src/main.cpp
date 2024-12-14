@@ -9,70 +9,34 @@
  any redistribution
 *********************************************************************/
 
-/* This example demo how to expose on-board external Flash as USB Mass Storage.
- * Following library is required
- *   - Adafruit_SPIFlash https://github.com/adafruit/Adafruit_SPIFlash
- *   - SdFat https://github.com/adafruit/SdFat
- *
- * Note: Adafruit fork of SdFat enabled ENABLE_EXTENDED_TRANSFER_CLASS and FAT12_SUPPORT
- * in SdFatConfig.h, which is needed to run SdFat on external flash. You can use original
- * SdFat library and manually change those macros
- *
- * Note2: If your flash is not formatted as FAT12 previously, you could format it using
- * follow sketch https://github.com/adafruit/Adafruit_SPIFlash/tree/master/examples/SdFat_format
+/* This example expose SD card as mass storage using
+ * default SD Library
  */
 
-#include "SPI.h"
-#include "SdFat.h"
-#include "Adafruit_SPIFlash.h"
+#include "SD.h"
 #include "Adafruit_TinyUSB.h"
 
-// for flashTransport definition
-#include "flash_config.h"
+const int chipSelect = 10;
 
-// function definitions
-int32_t msc_read_cb (uint32_t lba, void* buffer, uint32_t bufsize);
-int32_t msc_write_cb (uint32_t lba, uint8_t* buffer, uint32_t bufsize);
-void msc_flush_cb (void);
-
-Adafruit_SPIFlash flash(&flashTransport);
-
-// file system object from SdFat
-FatVolume fatfs;
-
-FatFile root;
-FatFile file;
-
-// USB Mass Storage object
 Adafruit_USBD_MSC usb_msc;
 
-// Check if flash is formatted
-bool fs_formatted = false;
-
-// Set to true when PC write to flash
-bool fs_changed = true;;
+Sd2Card card;
+SdVolume volume;
 
 // the setup function runs once when you press reset or power the board
 void setup()
 {
-  pinMode(LED_BUILTIN, OUTPUT);
-
   Serial.begin(115200);
 
-  flash.begin();
-
   // Set disk vendor id, product id and revision with string up to 8, 16, 4 characters respectively
-  usb_msc.setID("Adafruit", "External Flash", "1.0");
+  usb_msc.setID("Adafruit", "SD Card", "1.0");
 
-  // Set callback
+  // Set read write callback
   usb_msc.setReadWriteCallback(msc_read_cb, msc_write_cb, msc_flush_cb);
 
-  // Set disk size, block size should be 512 regardless of spi flash page size
-  usb_msc.setCapacity(flash.size()/512, 512);
-
-  // MSC is ready for read/write
-  usb_msc.setUnitReady(true);
-
+  // Still initialize MSC but tell usb stack that MSC is not ready to read/write
+  // If we don't initialize, board will be enumerated as CDC only
+  usb_msc.setUnitReady(false);
   usb_msc.begin();
 
   // If already enumerated, additional class driverr begin() e.g msc, hid, midi won't take effect until re-enumeration
@@ -82,96 +46,58 @@ void setup()
     TinyUSBDevice.attach();
   }
 
-  // Init file system on the flash
-  fs_formatted = fatfs.begin(&flash);
-
   //while ( !Serial ) delay(10);   // wait for native usb
+  Serial.println("Adafruit TinyUSB Mass Storage SD Card example");
+  Serial.println("\nInitializing SD card...");
 
-  Serial.println("Adafruit TinyUSB Mass Storage External Flash example");
-  Serial.print("JEDEC ID: 0x"); Serial.println(flash.getJEDECID(), HEX);
-  Serial.print("Flash size: "); Serial.print(flash.size() / 1024); Serial.println(" KB");
+  if ( !card.init(SPI_HALF_SPEED, chipSelect) ) {
+    Serial.println("initialization failed. Things to check:");
+    Serial.println("* is a card inserted?");
+    Serial.println("* is your wiring correct?");
+    Serial.println("* did you change the chipSelect pin to match your shield or module?");
+    while (1) delay(1);
+  }
+
+  // Now we will try to open the 'volume'/'partition' - it should be FAT16 or FAT32
+  if (!volume.init(card)) {
+    Serial.println("Could not find FAT16/FAT32 partition.\nMake sure you've formatted the card");
+    while (1) delay(1);
+  }
+  
+  uint32_t block_count = volume.blocksPerCluster()*volume.clusterCount();
+
+  Serial.print("Volume size (MB):  ");
+  Serial.println((block_count/2) / 1024);
+
+  // Set disk size, SD block size is always 512
+  usb_msc.setCapacity(block_count, 512);
+
+  // MSC is ready for read/write
+  usb_msc.setUnitReady(true);
 }
 
 void loop() {
-  // check if formatted
-  if ( !fs_formatted ) {
-    fs_formatted = fatfs.begin(&flash);
-
-    if (!fs_formatted) {
-      Serial.println("Failed to init files system, flash may not be formatted");
-      Serial.println("Please format it as FAT12 with your PC or using Adafruit_SPIFlash's SdFat_format example:");
-      Serial.println("- https://github.com/adafruit/Adafruit_SPIFlash/tree/master/examples/SdFat_format");
-      Serial.println();
-
-      delay(1000);
-      return;
-    }
-  }
-
-  if ( fs_changed ) {
-    fs_changed = false;
-
-    Serial.println("Opening root");
-
-    if ( !root.open("/") ) {
-      Serial.println("open root failed");
-      return;
-    }
-
-    Serial.println("Flash contents:");
-
-    // Open next file in root.
-    // Warning, openNext starts at the current directory position
-    // so a rewind of the directory may be required.
-    while ( file.openNext(&root, O_RDONLY) ) {
-      file.printFileSize(&Serial);
-      Serial.write(' ');
-      file.printName(&Serial);
-      if ( file.isDir() ) {
-        // Indicate a directory.
-        Serial.write('/');
-      }
-      Serial.println();
-      file.close();
-    }
-
-    root.close();
-
-    Serial.println();
-    delay(1000); // refresh every 1 second
-  }
+  // nothing to do
 }
 
 // Callback invoked when received READ10 command.
-// Copy disk's data to buffer (up to bufsize) and 
-// return number of copied bytes (must be multiple of block size) 
+// Copy disk's data to buffer (up to bufsize) and
+// return number of copied bytes (must be multiple of block size)
 int32_t msc_read_cb (uint32_t lba, void* buffer, uint32_t bufsize) {
-  // Note: SPIFLash Block API: readBlocks/writeBlocks/syncBlocks
-  // already include 4K sector caching internally. We don't need to cache it, yahhhh!!
-  return flash.readBlocks(lba, (uint8_t*) buffer, bufsize/512) ? bufsize : -1;
+  (void) bufsize;
+  return card.readBlock(lba, (uint8_t*) buffer) ? 512 : -1;
 }
 
 // Callback invoked when received WRITE10 command.
 // Process data in buffer to disk's storage and 
 // return number of written bytes (must be multiple of block size)
 int32_t msc_write_cb (uint32_t lba, uint8_t* buffer, uint32_t bufsize) {
-  digitalWrite(LED_BUILTIN, HIGH);
-
-  // Note: SPIFLash Block API: readBlocks/writeBlocks/syncBlocks
-  // already include 4K sector caching internally. We don't need to cache it, yahhhh!!
-  return flash.writeBlocks(lba, buffer, bufsize/512) ? bufsize : -1;
+  (void) bufsize;
+  return card.writeBlock(lba, buffer) ? 512 : -1;
 }
 
 // Callback invoked when WRITE10 command is completed (status received and accepted by host).
 // used to flush any pending cache.
 void msc_flush_cb (void) {
-  // sync with flash
-  flash.syncBlocks();
-
-  // clear file system's cache to force refresh
-  fatfs.cacheClear();
-
-  fs_changed = true;
-
-  digitalWrite(LED_BUILTIN, LOW);
+  // nothing to do
 }
