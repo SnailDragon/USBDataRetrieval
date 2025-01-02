@@ -31,7 +31,8 @@ SdVolume volume;
 // the setup function runs once when you press reset or power the board
 void setup() {
   Serial.begin(115200);
-  while(!Serial); 
+  while (!Serial)
+    ;
 
   // Set disk vendor id, product id and revision with string up to 8, 16, 4
   // characters respectively
